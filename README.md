@@ -1,6 +1,6 @@
 # CS534-Final-Project
 
-## Prerequisites to Compile Binary for ARM 32-bit Architecture
+## Prerequisites to Compile Binary Benchmarks for ARM 32-bit Architecture
 
 Before you begin, ensure that you have the necessary dependencies installed.
 
@@ -47,4 +47,29 @@ After modifying the Makefile to use the ARM cross-compiler, you can compile the 
 ```bash
 make
 ```
-This will trigger the compilation process. The output binaries (qsort_small and qsort_large) will be created in the current directory. You can then transfer these binaries to your ARM-based device to run the benchmarks.
+This will trigger the compilation process. The output binaries (qsort_small and qsort_large) will be created in the current directory. You can then transfer these binaries to your ARM-based device to run the benchmarks. Already compiled binaries are located in the ```bin``` folder
+
+## Running Binary in gem5
+Assumed dependencies are installed. 
+### 1. Build ISA
+More information can be found here https://www.gem5.org/documentation/general_docs/building
+```bash
+scons build/ARM/gem5.fast -j 4
+```
+### 2. Running Provided Configuration Script
+After build, run system emulation configuration script with these command line arguments:
+```bash
+build/ARM/gem5.fast --outdir=m5out/ configs/deprecated/example/se.py \
+ --cpu-type=ArmMinorCPU \
+--cpu-clock=4GHz \
+--cacheline_size=64 \
+--caches \
+--l1i_size=8kB \
+--l1d_size=8kB \
+--l2cache \
+--l2_size=4MB \
+--l2_assoc=16 \
+--num-cpus=4 \
+--cmd=path/to/bin/basicmath_large
+```
+Cacheline sizes and CPU frequency to be changed to model edge device.
