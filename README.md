@@ -53,7 +53,8 @@ make
 This will trigger the compilation process. The output binaries (qsort_small and qsort_large) will be created in the current directory. Already compiled binaries are located in the ```bin``` folder
 
 ## Running Binary in gem5
-Assumed dependencies are installed. 
+Assumed dependencies are installed and gem5 repo is cloned. 
+
 ### 1. Build ISA
 More information can be found here https://www.gem5.org/documentation/general_docs/building
 ```bash
