@@ -1,8 +1,8 @@
 # CS534-Final-Project
 
-## Prerequisites to Compile Binary Benchmarks for ARM 32-bit Architecture
+## Binary Benchmarks for ARM 32-bit Architecture
 
-Before you begin, ensure that you have the necessary dependencies installed.
+Benchmarks used are sourced from MiBench https://vhosts.eecs.umich.edu/mibench/ and https://github.com/embecosm/mibench.  Already compiled binaries are located in the ```bin``` folder which include basicmath, qsort, dijkstra and fft. If needed to compile other benchmarks, steps are listed below. 
 
 ### 1. Install the ARM Cross-Compiler
 
@@ -14,9 +14,12 @@ To install the ARM GCC toolchain, run the following command:
 sudo apt-get install gcc-arm-linux-gnueabihf
 ```
 
-### 2. Example Makefile Modification
-
-To compile the benchmarks for ARM 32-bit (AArch32) architecture, you will need to modify the Makefile to use the ARM cross-compiler (arm-linux-gnueabihf-gcc). Below is an example of how to modify the Makefile for an ARM 32-bit target. This example uses a simple sorting program (qsort_small and qsort_large) for demonstration.
+### 2. Clone Repository and Makefile Modification
+Clone the MiBench Repo 
+``` bash 
+git clone https://github.com/embecosm/mibench
+```
+Next to compile the benchmarks for ARM 32-bit (AArch32) architecture, you will need to modify the Makefile to use the ARM cross-compiler (arm-linux-gnueabihf-gcc). Below is an example of how to modify the Makefile for an ARM 32-bit target. This example uses a simple sorting program (qsort_small and qsort_large) for demonstration.
 
 Example Makefile for ARM 32-bit:
 ```bash
@@ -41,13 +44,13 @@ clean:
 	rm -rf qsort_small qsort_large output*
 ```
 
-### 3. How to Compile the Benchmark
+### 3. Compile the Benchmark
 
 After modifying the Makefile to use the ARM cross-compiler, you can compile the benchmark of your choice. In this case, the qsort_small and qsort_large benchmarks will be compiled for ARM 32-bit. Run the following command:
 ```bash
 make
 ```
-This will trigger the compilation process. The output binaries (qsort_small and qsort_large) will be created in the current directory. You can then transfer these binaries to your ARM-based device to run the benchmarks. Already compiled binaries are located in the ```bin``` folder
+This will trigger the compilation process. The output binaries (qsort_small and qsort_large) will be created in the current directory. Already compiled binaries are located in the ```bin``` folder
 
 ## Running Binary in gem5
 Assumed dependencies are installed. 
