@@ -1,0 +1,580 @@
+diff --git a/configs/deprecated/example/se.py b/configs/deprecated/example/se.py
+index 6ad4b02b32..0371cd26d5 100644
+--- a/configs/deprecated/example/se.py
++++ b/configs/deprecated/example/se.py
+@@ -134,6 +134,13 @@ parser = argparse.ArgumentParser()
+ Options.addCommonOptions(parser)
+ Options.addSEOptions(parser)
+ 
++parser.add_argument(
++    "--use-arch-pt",
++    action="store_true",
++    default=False,
++    help="Enable the use of page table in SE mode. Default: False",
++)
++
+ if "--ruby" in sys.argv:
+     Ruby.define_options(parser)
+ 
+@@ -291,6 +298,9 @@ else:
+ 
+ system.workload = SEWorkload.init_compatible(mp0_path)
+ 
++system.mem_mode = 'timing'
++
++
+ if args.wait_gdb:
+     system.workload.wait_for_remote_gdb = True
+ 
+diff --git a/src/arch/arm/pagetable.hh b/src/arch/arm/pagetable.hh
+index b5431c3bb3..fd6b05cec1 100644
+--- a/src/arch/arm/pagetable.hh
++++ b/src/arch/arm/pagetable.hh
+@@ -44,10 +44,12 @@
+ #include <cstdint>
+ 
+ #include "arch/arm/page_size.hh"
++#include "mem/port_proxy.hh"
+ #include "arch/arm/types.hh"
+ #include "arch/arm/utility.hh"
+ #include "arch/generic/mmu.hh"
+ #include "enums/TypeTLB.hh"
++#include "base/trie.hh"
+ #include "enums/ArmLookupLevel.hh"
+ #include "mem/cache/replacement_policies/replaceable_entry.hh"
+ #include "mem/cache/tags/indexing_policies/base.hh"
+@@ -61,6 +63,177 @@ namespace gem5
+ namespace ArmISA
+ {
+ 
++BitUnion64(TTBR)
++    Bitfield<31, 14> base_addr;
++    Bitfield<13,  8> reserved;
++    Bitfield< 7,  0> asid;
++EndBitUnion(TTBR)
++
++const Addr VADDR_BITS = 32;
++const Addr LEVEL_BITS = 10;
++const Addr LEVEL_MASK = (1 << LEVEL_BITS) - 1;
++
++BitUnion32(PTEArmL1)
++
++    Bitfield<31, 20> sec_base;   //section base address
++    Bitfield<19>     nG;         // not global
++    Bitfield<18>     S;          // sharable
++    Bitfield<17>     AP2;        // access‑perms ext
++    Bitfield<16>     TEX;        // type extension bits
++    Bitfield<15>     AP1;        // access‑perms
++    Bitfield<14>     AP0;
++    Bitfield<13,  5> domain;     // domain index
++    Bitfield< 4>     NS;         // non‑secure
++    Bitfield< 3>     B;          // bufferable
++    Bitfield< 2>     C;          // cacheable
++    Bitfield< 1,  0> type;       // 0b10 = Section, 0b01 = Coarse page table
++EndBitUnion(PTEArmL1)
++
++BitUnion32(PTEArmL2)
++    Bitfield<31, 12> page_base;  // page frame number
++    Bitfield<11>     AP2;        // AP extension
++    Bitfield<10>     TEX;        // extension bits
++    Bitfield< 9>     AP1;        // AP bits
++    Bitfield< 8>     AP0;
++    Bitfield< 7>     reserved;
++    Bitfield< 6>     nG;
++    Bitfield< 5>     S;
++    Bitfield< 4>     B;          // bufferable
++    Bitfield< 3>     C;          // cacheable
++    Bitfield< 2,  1> type;       // 0b10 = Small page
++    Bitfield< 0>     valid;      // must be 1
++EndBitUnion(PTEArmL2)
++
++template <int first, int last, typename PTEDesc>
++class HierarchyArm
++{
++  public:
++    //-------------------------------------------------------------------------------
++    // 1) Physical‐address accessor: pick the right field for L1 vs L2
++    Addr paddr() const {
++        if constexpr (std::is_same<PTEDesc, PTEArmL1>::value) {
++            return Addr(pte_iter.sec_base) << PageShift;
++        } else {
++            return Addr(pte_iter.page_base) << PageShift;
++        }
++    }
++    void paddr(Addr a) {
++        if constexpr (std::is_same<PTEDesc, PTEArmL1>::value) {
++            pte_iter.sec_base = a >> PageShift;
++        } else {
++            pte_iter.page_base = a >> PageShift;
++        }
++    }
++
++    //-------------------------------------------------------------------------------
++    // 2) Valid (present) and read‐only helpers
++
++    bool present() const {
++        if constexpr (std::is_same<PTEDesc, PTEArmL1>::value) {
++            // L1: any non‑zero type means “table present”
++            return pte_iter.type != 0;
++        } else {
++            // L2: has a real valid bit
++            return pte_iter.valid;
++        }
++    }
++
++    void present(bool v) {
++        if constexpr (std::is_same<PTEDesc, PTEArmL1>::value) {
++            // L1: type==1 for a “coarse table,” zero for invalid
++            pte_iter.type = v ? 1 : 0;
++        } else {
++            // L2: set the valid bit directly
++            pte_iter.valid = v;
++        }
++    }
++
++    bool readonly() const              { return !pte_iter.AP0;       }
++    void readonly(bool r)              { pte_iter.AP0   = r ? 1 : 0; }
++
++    // exec() / uncacheable() / user() can remain no‐ops or you can add fields
++    bool exec() const                  { return true; }
++    void exec(bool)                    { /* no XN in v7 small pages */ }
++
++    //-------------------------------------------------------------------------------
++    // 3) Read from page‐table, record entryAddr for write()
++    void read(PortProxy &proxy, Addr table, Addr vaddr) {
++        entryAddr = table
++                  + ((vaddr >> first) & LEVEL_MASK) * sizeof(PTEDesc);
++        pte_iter = proxy.read<PTEDesc>(entryAddr);
++    }
++
++    // 4) Write back the descriptor
++    void write(PortProxy &proxy) {
++        proxy.write(entryAddr, pte_iter);
++    }
++
++    //-------------------------------------------------------------------------------
++    // 5) reset() must match MultiLevelPageTable’s signature exactly
++    void reset(Addr _paddr,
++               bool _present      = true,
++               bool /*_executable*/   = false,
++               bool /*_uncacheable*/  = false,
++               bool _readonly     = false,
++               bool /*_user*/         = true,
++               bool _is_leaf      = false)
++    {
++        // zero the entire descriptor
++        pte_iter = PTEDesc(0);
++
++        // point at next‐level table or page frame
++        paddr(_paddr);
++
++        // if it’s the leaf level, set the valid bit
++        if (_is_leaf) {
++            present(_present);
++            if (_readonly)
++                readonly(true);
++        } else {
++            // L1 descriptor: mark as “coarse” table (type == 1)
++            pte_iter.type = 1;
++        }
++    }
++
++    //-------------------------------------------------------------------------------
++    // 6) tableSize() stays the same
++    static int tableSize() {
++        return 1 << (LEVEL_BITS + 2 /* log(sizeof) */ - PageShift);
++    }
++
++  private:
++    PTEDesc pte_iter;  // holds the raw PTE bits
++    Addr    entryAddr; // used by write()
++};
++
++
++//
++// TLB entry, identical structure to RISC‑V except using our ARM PTE
++//
++struct PageTableEntry;
++typedef Trie<Addr, PageTableEntry> PageTableEntryTrie;
++
++struct PageTableEntry : public Serializable
++{
++    Addr paddr;
++    Addr vaddr;
++    unsigned logBytes;
++    uint16_t asid;
++    // store the raw PTE to re‑serialize
++    union {
++        PTEArmL1 l1;
++        PTEArmL2 l2;
++    } pte;
++    PageTableEntryTrie::Handle trieHandle;
++    uint64_t lruSeq;
++
++    PageTableEntry() : paddr(0), vaddr(0), logBytes(0), asid(0), lruSeq(0) {}
++    Addr size() const { return (static_cast<Addr>(1) << logBytes); }
++
++    void serialize(CheckpointOut &cp) const override { /*…*/ }
++    void unserialize(CheckpointIn &cp) override { /*…*/ }
++};
++
+ // Granule sizes
+ enum GrainSize
+ {
+diff --git a/src/arch/arm/process.cc b/src/arch/arm/process.cc
+index b169f849d1..65eed84c69 100644
+--- a/src/arch/arm/process.cc
++++ b/src/arch/arm/process.cc
+@@ -41,6 +41,8 @@
+ #include "arch/arm/process.hh"
+ 
+ #include "arch/arm/page_size.hh"
++#include "arch/arm/pagetable.hh"
++#include "mem/multi_level_page_table.hh"
+ #include "arch/arm/regs/cc.hh"
+ #include "arch/arm/regs/misc.hh"
+ #include "arch/arm/types.hh"
+@@ -62,14 +64,27 @@ namespace gem5
+ 
+ using namespace ArmISA;
+ 
++template class MultiLevelPageTable< HierarchyArm<31, 20, PTEArmL1>,
++                                    HierarchyArm<19, 12, PTEArmL2>,
++                                    HierarchyArm<19, 12, PTEArmL2>
++                                    >;
++
++typedef MultiLevelPageTable<HierarchyArm<31, 20, PTEArmL1>,
++                            HierarchyArm<19, 12, PTEArmL2>,
++                            HierarchyArm<19, 12, PTEArmL2>
++> ArchPageTable;
++
+ ArmProcess::ArmProcess(const ProcessParams &params,
+                        loader::ObjectFile *objFile, loader::Arch _arch)
+-    : Process(params,
++    : Process(params, params.useArchPT ?
++              static_cast<EmulationPageTable *>(
++                          new ArchPageTable(params.name, params.pid,
++                                            params.system, PageBytes)) :
+               new EmulationPageTable(params.name, params.pid, PageBytes),
+               objFile),
+       arch(_arch)
+ {
+-    fatal_if(params.useArchPT, "Arch page tables not implemented.");
++   
+ }
+ 
+ ArmProcess32::ArmProcess32(const ProcessParams &params,
+@@ -77,10 +92,10 @@ ArmProcess32::ArmProcess32(const ProcessParams &params,
+     : ArmProcess(params, objFile, _arch)
+ {
+     Addr brk_point = roundUp(image.maxAddr(), PageBytes);
+-    Addr stack_base = 0xbf000000L;
++    Addr stack_base = useArchPT ? 0xC0000000UL : 0xbf000000L;
+     Addr max_stack_size = 8 * 1024 * 1024;
+     Addr next_thread_stack_base = stack_base - max_stack_size;
+-    Addr mmap_end = 0x40000000L;
++    Addr mmap_end = useArchPT ? 0xC0000000UL : 0x40000000L;
+ 
+     memState = std::make_shared<MemState>(
+             this, brk_point, stack_base, max_stack_size,
+@@ -106,7 +121,18 @@ ArmProcess64::ArmProcess64(
+ void
+ ArmProcess32::initState()
+ {
++    if (useArchPT) {
++        // TTBR holds bits [31:14] of the base address, plus an 8‑bit ASID
++        TTBR ttbr0(0);
++        ttbr0.base_addr = static_cast<ArchPageTable*>(pTable)->basePtr()
++                            >> ArmISA::PageShift;  // PageShift = 12
++        ttbr0.asid      = this->pid() & 0xff;
++        for (ContextID ctx: contextIds)
++            system->threads[ctx]->setMiscReg(MISCREG_TTBR0, ttbr0);
++    }
+     Process::initState();
++
++
+     argsInit<uint32_t>(PageBytes, int_reg::Sp);
+     for (auto id: contextIds) {
+         ThreadContext *tc = system->threads[id];
+diff --git a/src/base/loader/elf_object.cc b/src/base/loader/elf_object.cc
+index 26fb443c79..7102417f0b 100644
+--- a/src/base/loader/elf_object.cc
++++ b/src/base/loader/elf_object.cc
+@@ -375,13 +375,15 @@ ElfObject::handleLoadableSegment(GElf_Phdr phdr, int seg_num)
+ {
+     auto name = std::to_string(seg_num);
+ 
++    bool executable = phdr.p_flags & PF_X;
++
+     if (phdr.p_memsz == 0) {
+         warn("Ignoring empty loadable segment %s", name);
+         return;
+     }
+ 
+     image.addSegment({ name, phdr.p_paddr, imageData,
+-                       phdr.p_offset, phdr.p_filesz });
++                       phdr.p_offset, phdr.p_filesz, executable});
+     Addr uninitialized = phdr.p_memsz - phdr.p_filesz;
+     if (uninitialized) {
+         // There may be parts of a segment which aren't included in the
+diff --git a/src/base/loader/memory_image.cc b/src/base/loader/memory_image.cc
+index a3f378c10b..bbba6d5d04 100644
+--- a/src/base/loader/memory_image.cc
++++ b/src/base/loader/memory_image.cc
+@@ -40,7 +40,7 @@ MemoryImage::writeSegment(const Segment &seg, const PortProxy &proxy) const
+ {
+     if (seg.size != 0) {
+         if (seg.data) {
+-            proxy.writeBlob(seg.base, seg.data, seg.size);
++            proxy.writeBlob(seg.base, seg.data, seg.size, seg.executable);
+         } else {
+             // no image: must be bss
+             proxy.memsetBlob(seg.base, 0, seg.size);
+diff --git a/src/base/loader/memory_image.hh b/src/base/loader/memory_image.hh
+index 1207e7458d..24612527ba 100644
+--- a/src/base/loader/memory_image.hh
++++ b/src/base/loader/memory_image.hh
+@@ -55,17 +55,17 @@ class MemoryImage
+     struct Segment
+     {
+         Segment(const std::string &_name, Addr _base,
+-                const uint8_t *_data, size_t _size) :
+-            name(_name), base(_base), data(_data), size(_size)
++                const uint8_t *_data, size_t _size, bool _exec=false) :
++            name(_name), base(_base), data(_data), size(_size), executable(_exec)
+         {}
+ 
+-        Segment(const std::string &_name, Addr _base, size_t _size) :
+-            name(_name), base(_base), size(_size)
++        Segment(const std::string &_name, Addr _base, size_t _size, bool _exec=false) :
++            name(_name), base(_base), size(_size), executable(_exec)
+         {}
+ 
+         Segment(const std::string &_name, Addr _base,
+-                const ImageFileDataPtr &_ifd, Addr offset, size_t _size) :
+-            ifd(_ifd), name(_name), base(_base), size(_size)
++                const ImageFileDataPtr &_ifd, Addr offset, size_t _size, bool _exec=false) :
++            ifd(_ifd), name(_name), base(_base), size(_size), executable(_exec)
+         {
+             panic_if(offset + size > ifd->len(),
+                     "Segment outside the bounds of the image data");
+@@ -81,6 +81,7 @@ class MemoryImage
+         Addr base = 0;
+         const uint8_t *data = nullptr;
+         size_t size = 0;
++        bool executable;
+     };
+ 
+     MemoryImage() {}
+diff --git a/src/mem/multi_level_page_table.hh b/src/mem/multi_level_page_table.hh
+index f482f8cba4..cd7cfcd2eb 100644
+--- a/src/mem/multi_level_page_table.hh
++++ b/src/mem/multi_level_page_table.hh
+@@ -217,7 +217,7 @@ public:
+     Addr basePtr() { return _basePtr; }
+ 
+     void
+-    map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags = 0) override
++    map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags = 0, bool executable=false) override
+     {
+         EmulationPageTable::map(vaddr, paddr, size, flags);
+ 
+@@ -228,7 +228,7 @@ public:
+                                 vaddr + offset, true, &entry);
+ 
+             entry.reset(paddr + offset, true, flags & Uncacheable,
+-                        flags & ReadOnly);
++                        flags & ReadOnly, true, true);
+             entry.write(system->physProxy);
+ 
+             DPRINTF(MMU, "New mapping: %#x-%#x\n",
+@@ -253,7 +253,7 @@ public:
+             // Map the new one.
+             walk<EntryTypes...>(system, _pageSize, _basePtr,
+                                 new_vaddr + offset, true, &new_entry);
+-            new_entry.reset(old_entry.paddr(), true, old_entry.uncacheable(),
++            new_entry.reset(old_entry.paddr(), true, false,
+                             old_entry.readonly());
+             new_entry.write(system->physProxy);
+         }
+diff --git a/src/mem/page_table.cc b/src/mem/page_table.cc
+index d715e0771f..5af0698994 100644
+--- a/src/mem/page_table.cc
++++ b/src/mem/page_table.cc
+@@ -45,7 +45,7 @@ namespace gem5
+ {
+ 
+ void
+-EmulationPageTable::map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags)
++EmulationPageTable::map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags, bool executable)
+ {
+     bool clobber = flags & Clobber;
+     // starting address must be page aligned
+diff --git a/src/mem/page_table.hh b/src/mem/page_table.hh
+index a17250c17d..364187df80 100644
+--- a/src/mem/page_table.hh
++++ b/src/mem/page_table.hh
+@@ -122,7 +122,7 @@ class EmulationPageTable : public Serializable
+      * @param flags Generic mapping flags that can be set by or-ing values
+      *              from MappingFlags enum.
+      */
+-    virtual void map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags = 0);
++    virtual void map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags = 0, bool executable=false);
+     virtual void remap(Addr vaddr, int64_t size, Addr new_vaddr);
+     virtual void unmap(Addr vaddr, int64_t size);
+ 
+diff --git a/src/mem/port_proxy.hh b/src/mem/port_proxy.hh
+index 49c6d6f811..e5a8a57941 100644
+--- a/src/mem/port_proxy.hh
++++ b/src/mem/port_proxy.hh
+@@ -154,7 +154,7 @@ class PortProxy : FunctionalRequestProtocol
+      * Returns true on success and false on failure.
+      */
+     virtual bool
+-    tryWriteBlob(Addr addr, const void *p, uint64_t size) const
++    tryWriteBlob(Addr addr, const void *p, int size, bool executable=false) const
+     {
+         writeBlobPhys(addr, 0, p, size);
+         return true;
+@@ -189,9 +189,9 @@ class PortProxy : FunctionalRequestProtocol
+      * Same as tryWriteBlob, but insists on success.
+      */
+     void
+-    writeBlob(Addr addr, const void *p, uint64_t size) const
++    writeBlob(Addr addr, const void *p, int size, bool executable=false) const
+     {
+-        if (!tryWriteBlob(addr, p, size))
++        if (!tryWriteBlob(addr, p, size, executable))
+             fatal("writeBlob(%#x, ...) failed", addr);
+     }
+ 
+diff --git a/src/mem/se_translating_port_proxy.cc b/src/mem/se_translating_port_proxy.cc
+index 8f4544c80f..59b088ca97 100644
+--- a/src/mem/se_translating_port_proxy.cc
++++ b/src/mem/se_translating_port_proxy.cc
+@@ -57,9 +57,14 @@ SETranslatingPortProxy::fixupRange(const TranslationGen::Range &range,
+ {
+     auto *process = _tc->getProcessPtr();
+ 
+-    if (mode == BaseMMU::Write) {
++    if (mode == BaseMMU::Write || mode == BaseMMU::Execute) {
+         if (allocating == Always) {
+-            process->allocateMem(range.vaddr, range.size);
++            if (mode == BaseMMU::Write) {
++                process->allocateMem(range.vaddr, range.size);
++            }
++            else{
++                process->allocateMem(range.vaddr, range.size, false,true);
++            }
+             return true;
+         } else if (allocating == NextPage &&
+                 process->fixupFault(range.vaddr)) {
+diff --git a/src/mem/translating_port_proxy.cc b/src/mem/translating_port_proxy.cc
+index 68de8dbb7a..6f349e8f49 100644
+--- a/src/mem/translating_port_proxy.cc
++++ b/src/mem/translating_port_proxy.cc
+@@ -98,10 +98,10 @@ TranslatingPortProxy::tryReadBlob(Addr addr, void *p, uint64_t size) const
+ }
+ 
+ bool
+-TranslatingPortProxy::tryWriteBlob(
+-        Addr addr, const void *p, uint64_t size) const
++TranslatingPortProxy::tryWriteBlob(Addr addr, const void *p, int size, 
++                bool executable) const
+ {
+-    constexpr auto mode = BaseMMU::Write;
++    auto mode = executable ? BaseMMU::Execute : BaseMMU::Write;
+     return tryOnBlob(mode, _tc->getMMUPtr()->translateFunctional(
+             addr, size, _tc, mode, flags),
+         [this, &p](const auto &range) {
+diff --git a/src/mem/translating_port_proxy.hh b/src/mem/translating_port_proxy.hh
+index 9e60a858b9..551634f9e8 100644
+--- a/src/mem/translating_port_proxy.hh
++++ b/src/mem/translating_port_proxy.hh
+@@ -81,7 +81,8 @@ class TranslatingPortProxy : public PortProxy
+ 
+     /** Version of tryWriteBlob that translates virt->phys and deals
+       * with page boundries. */
+-    bool tryWriteBlob(Addr addr, const void *p, uint64_t size) const override;
++      bool tryWriteBlob(Addr addr, const void *p, int size, 
++                  bool executable=false) const override;
+ 
+     /**
+      * Fill size bytes starting at addr with byte value val.
+diff --git a/src/python/SConscript b/src/python/SConscript
+index ab711fb668..b8aaad0932 100644
+--- a/src/python/SConscript
++++ b/src/python/SConscript
+@@ -91,6 +91,9 @@ PySource('gem5.components.cachehierarchies.classic',
+ PySource('gem5.components.cachehierarchies.classic',
+     'gem5/components/cachehierarchies/classic/'
+     'private_l1_private_l2_cache_hierarchy.py')
++PySource('gem5.components.cachehierarchies.classic',
++    'gem5/components/cachehierarchies/classic/'
++    'private_l1_private_l2_cache_no_ptwc_hierarchy.py')
+ PySource('gem5.components.cachehierarchies.classic',
+     'gem5/components/cachehierarchies/classic/'
+     'private_l1_private_l2_walk_cache_hierarchy.py')
+diff --git a/src/python/gem5/components/boards/se_binary_workload.py b/src/python/gem5/components/boards/se_binary_workload.py
+index 08c4518ded..872d330719 100644
+--- a/src/python/gem5/components/boards/se_binary_workload.py
++++ b/src/python/gem5/components/boards/se_binary_workload.py
+@@ -78,6 +78,7 @@ class SEBinaryWorkload:
+         env_list: Optional[List[str]] = None,
+         arguments: List[str] = [],
+         checkpoint: Optional[Union[Path, CheckpointResource]] = None,
++        use_arch_pt: bool = False,
+     ) -> None:
+         """Set up the system to run a specific binary.
+ 
+@@ -95,6 +96,7 @@ class SEBinaryWorkload:
+         :param arguments: The input arguments for the binary
+         :param checkpoint: The checkpoint directory. Used to restore the
+                            simulation to that checkpoint.
++        :param use_arch_pt: Enable the use of page walker in SE mode.
+         """
+ 
+         # We assume this this is in a multiple-inheritance setup with an
+@@ -123,6 +125,7 @@ class SEBinaryWorkload:
+             process.errout = stderr_file.as_posix()
+         if env_list is not None:
+             process.env = env_list
++        process.useArchPT = use_arch_pt
+ 
+         if any(
+             core.is_kvm_core() for core in self.get_processor().get_cores()
+diff --git a/src/sim/process.cc b/src/sim/process.cc
+index 7b6e2d0de2..e8f1b10a59 100644
+--- a/src/sim/process.cc
++++ b/src/sim/process.cc
+@@ -314,7 +314,7 @@ Process::drain()
+ }
+ 
+ void
+-Process::allocateMem(Addr vaddr, int64_t size, bool clobber)
++Process::allocateMem(Addr vaddr, int64_t size, bool clobber, bool executable)
+ {
+     const auto page_size = pTable->pageSize();
+ 
+@@ -340,7 +340,7 @@ Process::allocateMem(Addr vaddr, int64_t size, bool clobber)
+     const Addr pages_size = npages * page_size;
+     pTable->map(page_addr, paddr, pages_size,
+                 clobber ? EmulationPageTable::Clobber :
+-                          EmulationPageTable::MappingFlags(0));
++                          EmulationPageTable::MappingFlags(0), executable);
+ }
+ 
+ void
+diff --git a/src/sim/process.hh b/src/sim/process.hh
+index 9d04ccd094..acbac73eb3 100644
+--- a/src/sim/process.hh
++++ b/src/sim/process.hh
+@@ -118,7 +118,7 @@ class Process : public SimObject
+     // align to page boundaries, it will be expanded in either direction until
+     // it does. This function will therefore set up *at least* the range
+     // requested, and may configure more if necessary.
+-    void allocateMem(Addr vaddr, int64_t size, bool clobber=false);
++    void allocateMem(Addr vaddr, int64_t size, bool clobber=false, bool executable=false);
+ 
+     /// Attempt to fix up a fault at vaddr by allocating a page on the stack.
+     /// @return Whether the fault has been fixed.
