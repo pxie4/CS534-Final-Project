@@ -1,25 +1,127 @@
+diff --git a/.vscode/settings.json b/.vscode/settings.json
+index 9543f965b7..1c3606f473 100644
+--- a/.vscode/settings.json
++++ b/.vscode/settings.json
+@@ -3,5 +3,8 @@
+         "src/python",
+         "ext",
+         "tests"
+-    ]
++    ],
++    "files.associations": {
++        "*.inc": "cpp"
++    }
+ }
 diff --git a/src/arch/arm/mmu.cc b/src/arch/arm/mmu.cc
-index 47f3a796ca..c0c3a5326d 100644
+index 47f3a796ca..7a06f4c948 100644
 --- a/src/arch/arm/mmu.cc
 +++ b/src/arch/arm/mmu.cc
-@@ -1203,12 +1203,14 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
+@@ -362,13 +362,66 @@ MMU::translateSe(const RequestPtr &req, ThreadContext *tc, Mode mode,
+ 
+     Process *p = tc->getProcessPtr();
+     if (const auto pte = p->pTable->lookup(vaddr); !pte) {
++        DPRINTF(MMU, "TranslateSE failed for %#x\n", vaddr);
+         return std::make_shared<GenericPageTableFault>(vaddr_tainted);
+     } else {
++
+         req->setPaddr(pte->paddr + p->pTable->pageOffset(vaddr));
+ 
+-        if (pte->flags & EmulationPageTable::Uncacheable)
++        if (pte->flags & EmulationPageTable::Uncacheable){
+             req->setFlags(Request::UNCACHEABLE);
++        }
+ 
++        Addr base64 = roundDown(vaddr, 64 * 1024);
++        Addr base16 = roundDown(vaddr, 16 * 1024);
++
++        auto updateStats = [&](Addr base, size_t size, auto &statMap) {
++            auto it = statMap.find(base);
++            // if (it == statMap.end()) {
++            //     DPRINTF(MMU, "No stat entry found for base %#x (size %zu)\n", base, size);
++            //     return;
++            // }
++
++            auto &stats = it->second;
++            stats.totalAccesses++;
++            stats.last_access_tick = curTick();
++            DPRINTF(MMU, "Updating stats for base %#x: totalAccesses = %d\n",
++                    base, stats.totalAccesses);
++
++            uint32_t offset = vaddr - base;
++            DPRINTF(MMU, "Vaddr %#x, base %#x, offset %u\n", vaddr, base, offset);
++
++            if (offset >= size / 2) {
++                stats.upperHalfAccesses++;
++                if (offset >= size * 3 / 4) {
++                    stats.upperUpperQuarterAccesses++;
++                        
++                } else {
++                    stats.upperUpperQuarterAccesses--;
++                }
++            } else {
++                stats.upperHalfAccesses--;
++                if (offset < size / 4) {
++                    stats.lowerLowerQuarterAccesses++;
++                } else {
++                    stats.lowerLowerQuarterAccesses--;
++                }
++            }
++
++            if (stats.totalAccesses == 20) {
++                p->pTable->checkHugePageHotness(vaddr);
++            }
++        };
++        if (p->pTable->page64KBStats.find(base64) != p->pTable->page64KBStats.end()){
++            updateStats(base64, 64 * 1024, p->pTable->page64KBStats);
++        } else {
++            DPRINTF(MMU, "No stat entry found for base %#x in 64KB statmap\n", base64);
++        }
++        if (p->pTable->page16KBStats.find(base16) != p->pTable->page16KBStats.end()){
++            updateStats(base16, 16 * 1024, p->pTable->page16KBStats);
++        } else {
++            DPRINTF(MMU, "No stat entry found for base %#x in 16KB statmap\n", base16);
++        }
+         return finalizePhysical(req, tc, mode);
+     }
+ }
+@@ -1203,12 +1256,12 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
  {
      bool delay = false;
      Fault fault;
 -    if (FullSystem)
 +    if (FullSystem){
-+        DPRINTF(MMU, " Is Fs really on");
          fault = translateFs(req, tc, mode, translation, delay, true, tran_type,
              false, state);
 -    else
 +    }else{
-+        DPRINTF(MMU, " translateSE");
          fault = translateSe(req, tc, mode, translation, delay, true, state);
 -
 +    }
      DPRINTF(MMU, "Translation returning delay=%d fault=%d\n", delay,
              fault != NoFault);
      // If we have a translation, and we're not in the middle of doing a stage
+@@ -1217,7 +1270,20 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
+     // stage 2 translation we prevent marking the translation as delayed twice,
+     // one when the translation starts and again when the stage 1 translation
+     // completes.
+-
++    // if (fault != NoFault && !FullSystem){
++    //     Addr vaddr_tainted = req->getVaddr();
++    //     Addr vaddr = 0;
++    //     if (state.aarch64) {
++    //         vaddr = purifyTaggedAddr(vaddr_tainted, tc, state.exceptionLevel,
++    //             static_cast<TCR>(state.ttbcr), mode==Execute, state);
++    //     } else {
++    //         vaddr = vaddr_tainted;
++    //     }
++    //     Process *p = tc->getProcessPtr();
++    //     p->fixupFault(vaddr);
++    //     // Cheat way to fix Page Fault (Normal gem5 seems not to be able handle page deallocations)
++    // }
++    
+     if (translation && (call_from_s2 || !state.stage2Req || req->hasPaddr() ||
+         fault != NoFault)) {
+         if (!delay)
 diff --git a/src/arch/arm/mmu.hh b/src/arch/arm/mmu.hh
 index c6b1ddbb3e..c02cc4d48f 100644
 --- a/src/arch/arm/mmu.hh
@@ -38,10 +140,10 @@ index c6b1ddbb3e..c02cc4d48f 100644
  
      enum ArmFlags
 diff --git a/src/mem/page_table.cc b/src/mem/page_table.cc
-index d715e0771f..13ef2c3fd7 100644
+index d715e0771f..768e78b3fa 100644
 --- a/src/mem/page_table.cc
 +++ b/src/mem/page_table.cc
-@@ -51,6 +51,16 @@ EmulationPageTable::map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags)
+@@ -51,6 +51,17 @@ EmulationPageTable::map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags)
      // starting address must be page aligned
      assert(pageOffset(vaddr) == 0);
  
@@ -53,12 +155,13 @@ index d715e0771f..13ef2c3fd7 100644
 +
 +        // Track it
 +        page64KBStats[base64kAlignedVaddr] = PageAccessStats();
++        page64KBStats[base64kAlignedVaddr].last_access_tick = curTick();
 +    }
 +
      DPRINTF(MMU, "Allocating Page: %#x-%#x\n", vaddr, vaddr + size);
  
      while (size > 0) {
-@@ -132,6 +142,7 @@ EmulationPageTable::isUnmapped(Addr vaddr, int64_t size)
+@@ -132,6 +143,7 @@ EmulationPageTable::isUnmapped(Addr vaddr, int64_t size)
  const EmulationPageTable::Entry *
  EmulationPageTable::lookup(Addr vaddr)
  {
@@ -66,7 +169,7 @@ index d715e0771f..13ef2c3fd7 100644
      Addr page_addr = pageAlign(vaddr);
      PTableItr iter = pTable.find(page_addr);
      if (iter == pTable.end())
-@@ -139,9 +150,106 @@ EmulationPageTable::lookup(Addr vaddr)
+@@ -139,9 +151,108 @@ EmulationPageTable::lookup(Addr vaddr)
      return &(iter->second);
  }
  
@@ -99,7 +202,7 @@ index d715e0771f..13ef2c3fd7 100644
 +                if (offset >= size * 3 / 4) {
 +                    if ((stats.upperHalfAccesses <= -10) != (stats.upperUpperQuarterAccesses <= -10)) {
 +                        DPRINTF(MMU, "Deallocating page 0x%lx in top quarter (3/4 - end)\n", page);
-+                        pTable.erase(page);
++                        // pTable.erase(page);
 +                    } else {
 +                        DPRINTF(MMU, "Demoting page 0x%lx from 64kB to 16kB\n", page);
 +                        if (size == 64 * 1024) {
@@ -113,7 +216,7 @@ index d715e0771f..13ef2c3fd7 100644
 +                } else if (offset >= size * 1 / 2) {
 +                    if ((stats.upperHalfAccesses <= -10) != (stats.upperUpperQuarterAccesses >= 10)) {
 +                        DPRINTF(MMU, "Deallocating page 0x%lx in upper half (1/2 - 3/4)\n", page);
-+                        pTable.erase(page);
++                        // pTable.erase(page);
 +                    } else {
 +                        DPRINTF(MMU, "Demoting page 0x%lx from 64kB to 16kB\n", page);
 +                        if (size == 64 * 1024) {
@@ -127,7 +230,7 @@ index d715e0771f..13ef2c3fd7 100644
 +                } else if (offset >= size * 1 / 4) {
 +                    if ((stats.upperHalfAccesses >= 10) != (stats.lowerLowerQuarterAccesses >= 10)) {
 +                        DPRINTF(MMU, "Deallocating page 0x%lx in middle (1/4 - 1/2)\n", page);
-+                        pTable.erase(page);
++                        // pTable.erase(page);
 +                    } else {
 +                        DPRINTF(MMU, "Demoting page 0x%lx from 64kB to 16kB\n", page);
 +                        if (size == 64 * 1024) {
@@ -141,7 +244,7 @@ index d715e0771f..13ef2c3fd7 100644
 +                } else {
 +                    if ((stats.upperHalfAccesses >= 10) != (stats.lowerLowerQuarterAccesses <= -10)) {
 +                        DPRINTF(MMU, "Deallocating page 0x%lx in lower quarter (0 - 1/4)\n", page);
-+                        pTable.erase(page);
++                        // pTable.erase(page);
 +                    } else {
 +                        DPRINTF(MMU, "Demoting page 0x%lx from 64kB to 16kB\n", page);
 +                        if (size == 64 * 1024) {
@@ -157,6 +260,8 @@ index d715e0771f..13ef2c3fd7 100644
 +
 +            DPRINTF(MMU, "Removing stats for base 0x%lx from statMap\n", base);
 +            statMap.erase(base);
++        } else {
++            stats.totalAccesses = 0;
 +        }
 +    };
 +
@@ -173,7 +278,7 @@ index d715e0771f..13ef2c3fd7 100644
      const Entry *entry = lookup(vaddr);
      if (!entry) {
          DPRINTF(MMU, "Couldn't Translate: %#x\n", vaddr);
-@@ -156,6 +264,7 @@ Fault
+@@ -156,6 +267,7 @@ Fault
  EmulationPageTable::translate(const RequestPtr &req)
  {
      Addr paddr;
@@ -181,59 +286,15 @@ index d715e0771f..13ef2c3fd7 100644
      assert(pageAlign(req->getVaddr() + req->getSize() - 1) ==
             pageAlign(req->getVaddr()));
      if (!translate(req->getVaddr(), paddr))
-@@ -165,6 +274,51 @@ EmulationPageTable::translate(const RequestPtr &req)
+@@ -165,6 +277,7 @@ EmulationPageTable::translate(const RequestPtr &req)
          panic("Request spans page boundaries!\n");
          return NoFault;
      }
 +
-+    Addr vaddr = req->getVaddr();
-+    Addr base64 = roundDown(vaddr, 64 * 1024);
-+    Addr base16 = roundDown(vaddr, 16 * 1024);
-+
-+    auto updateStats = [&](Addr base, size_t size, auto &statMap) {
-+        auto it = statMap.find(base);
-+        if (it == statMap.end()) {
-+            DPRINTF(MMU, "No stat entry found for base %#x (size %zu)\n", base, size);
-+            return;
-+        }
-+
-+        auto &stats = it->second;
-+        stats.totalAccesses++;
-+        DPRINTF(MMU, "Updating stats for base %#x: totalAccesses = %d\n",
-+                base, stats.totalAccesses);
-+
-+        uint32_t offset = vaddr - base;
-+        DPRINTF(MMU, "Vaddr %#x, base %#x, offset %u\n", vaddr, base, offset);
-+
-+        if (offset >= size / 2) {
-+            stats.upperHalfAccesses++;
-+            if (offset >= size * 3 / 4) {
-+                stats.upperUpperQuarterAccesses++;
-+                       
-+            } else {
-+                stats.upperUpperQuarterAccesses--;
-+            }
-+        } else {
-+            stats.upperHalfAccesses--;
-+            if (offset < size / 4) {
-+                stats.lowerLowerQuarterAccesses++;
-+            } else {
-+                stats.lowerLowerQuarterAccesses--;
-+            }
-+        }
-+
-+        if (stats.totalAccesses == 20) {
-+            checkHugePageHotness(vaddr);
-+        }
-+    };
-+
-+    updateStats(base64, 64 * 1024, page64KBStats);
-+    updateStats(base16, 16 * 1024, page16KBStats);
-+
      return NoFault;
  }
  
-@@ -172,6 +326,7 @@ void
+@@ -172,6 +285,7 @@ void
  EmulationPageTable::PageTableTranslationGen::translate(Range &range) const
  {
      const Addr page_size = pt->pageSize();
@@ -242,33 +303,37 @@ index d715e0771f..13ef2c3fd7 100644
      Addr next = roundUp(range.vaddr, page_size);
      if (next == range.vaddr)
 diff --git a/src/mem/page_table.hh b/src/mem/page_table.hh
-index a17250c17d..9c967766fb 100644
+index a17250c17d..83e6dc4bcb 100644
 --- a/src/mem/page_table.hh
 +++ b/src/mem/page_table.hh
-@@ -62,10 +62,21 @@ class EmulationPageTable : public Serializable
+@@ -62,11 +62,24 @@ class EmulationPageTable : public Serializable
          Entry() {}
      };
  
 +    struct PageAccessStats {
 +      uint64_t totalAccesses = 0;
++      Tick last_access_tick = 0;
 +      uint32_t upperHalfAccesses = 0;
 +      uint32_t upperUpperQuarterAccesses = 0;
 +      uint32_t lowerLowerQuarterAccesses = 0;
 +    };
 +    std::unordered_map<Addr, Entry> pTable;
++    // MY CHANGES
++    std::unordered_map<Addr, PageAccessStats> page64KBStats;
++    std::unordered_map<Addr, PageAccessStats> page16KBStats;
++    uint64_t global_translation_counter; // used to periodiaclly scan for cold pages 
++    //---------------------
    protected:
      typedef std::unordered_map<Addr, Entry> PTable;
      typedef PTable::iterator PTableItr;
 -    PTable pTable;
+-
 +    
-+    // MY CHANGES
-+    std::unordered_map<Addr, PageAccessStats> page64KBStats;
-+    std::unordered_map<Addr, PageAccessStats> page16KBStats;
-+    //---------------------
- 
++   
      const Addr _pageSize;
      const Addr offsetMask;
-@@ -142,6 +153,12 @@ class EmulationPageTable : public Serializable
+ 
+@@ -142,6 +155,12 @@ class EmulationPageTable : public Serializable
      const Entry *lookup(Addr vaddr);
  
      /**
@@ -282,51 +347,51 @@ index a17250c17d..9c967766fb 100644
       * @param vaddr The virtual address.
       * @param paddr Physical address from translation.
 diff --git a/src/mem/se_translating_port_proxy.cc b/src/mem/se_translating_port_proxy.cc
-index 8f4544c80f..09ab920b01 100644
+index 8f4544c80f..4d354f8275 100644
 --- a/src/mem/se_translating_port_proxy.cc
 +++ b/src/mem/se_translating_port_proxy.cc
-@@ -56,16 +56,32 @@ SETranslatingPortProxy::fixupRange(const TranslationGen::Range &range,
+@@ -56,13 +56,31 @@ SETranslatingPortProxy::fixupRange(const TranslationGen::Range &range,
          BaseMMU::Mode mode) const
  {
      auto *process = _tc->getProcessPtr();
 -
      if (mode == BaseMMU::Write) {
-         if (allocating == Always) {
--            process->allocateMem(range.vaddr, range.size);
-+            constexpr int64_t hugePageSize = 64 * 1024;
-+            const Addr start = roundDown(range.vaddr, hugePageSize);
-+            const Addr end = range.vaddr + range.size;
-+
-+            for (Addr addr = range.vaddr; addr < end; addr += hugePageSize) {
-+                // Allocate only the remaining size if we're at the final chunk.
-+                int64_t allocSize = std::min((Addr)(end - addr), (Addr)hugePageSize);
-+                process->allocateMem(addr, allocSize);
-+            }
-+
-             return true;
-         } else if (allocating == NextPage &&
--                process->fixupFault(range.vaddr)) {
--            // We've accessed the next page on the stack.
-+            process->fixupFault(range.vaddr)) {
-             return true;
-         }
-+
 +        // if (allocating == Always) {
-+        //     process->allocateMem(range.vaddr, range.size);
++        //     constexpr int64_t hugePageSize = 64 * 1024;
++        //     // const Addr start = roundDown(range.vaddr, hugePageSize);
++        //     const Addr end = range.vaddr + range.size;
++
++        //     for (Addr addr = range.vaddr; addr < end; addr += hugePageSize) {
++        //         // Allocate only the remaining size if we're at the final chunk.
++        //         int64_t allocSize = std::min((Addr)(end - addr), (Addr)hugePageSize);
++        //         process->allocateMem(addr, allocSize);
++        //     }
++
 +        //     return true;
 +        // } else if (allocating == NextPage &&
-+        //         process->fixupFault(range.vaddr)) {
-+        //     // We've accessed the next page on the stack.
++        //     process->fixupFault(range.vaddr)) {
 +        //     return true;
 +        // }
-     }
-     return false;
- }
++
+         if (allocating == Always) {
++            // DPRINTF(Vma, "Range with allocateMem with size: %#x,", range.size);
+             process->allocateMem(range.vaddr, range.size);
+             return true;
+         } else if (allocating == NextPage &&
+                 process->fixupFault(range.vaddr)) {
++                    // DPRINTF(Vma, "Range with fixupFault with size: %#x,", range.size);
+             // We've accessed the next page on the stack.
+             return true;
+         }
 diff --git a/src/sim/mem_state.cc b/src/sim/mem_state.cc
-index 93e7ca3773..5bbcc51b84 100644
+index 93e7ca3773..9059f5fc76 100644
 --- a/src/sim/mem_state.cc
 +++ b/src/sim/mem_state.cc
-@@ -398,7 +398,27 @@ MemState::fixupFault(Addr vaddr)
+@@ -395,10 +395,31 @@ MemState::fixupFault(Addr vaddr)
+      * Check if we are accessing a mapped virtual address. If so then we
+      * just haven't allocated it a physical page yet and can do so here.
+      */
++    DPRINTF(Vma, "Is fixupFault() called");
      for (const auto &vma : _vmaList) {
          if (vma.contains(vaddr)) {
              Addr vpage_start = roundDown(vaddr, _pageBytes);
@@ -355,7 +420,7 @@ index 93e7ca3773..5bbcc51b84 100644
  
              /**
               * We are assuming that fresh pages are zero-filled, so there is
-@@ -430,6 +450,8 @@ MemState::fixupFault(Addr vaddr)
+@@ -430,6 +451,8 @@ MemState::fixupFault(Addr vaddr)
       * yet.
       */
      if (vaddr >= _stackMin && vaddr < _stackBase) {
@@ -364,7 +429,7 @@ index 93e7ca3773..5bbcc51b84 100644
          _ownerProcess->allocateMem(roundDown(vaddr, _pageBytes), _pageBytes);
          return true;
      }
-@@ -444,6 +466,8 @@ MemState::fixupFault(Addr vaddr)
+@@ -444,12 +467,39 @@ MemState::fixupFault(Addr vaddr)
              if (_stackBase - _stackMin > _maxStackSize) {
                  fatal("Maximum stack size exceeded\n");
              }
@@ -373,6 +438,37 @@ index 93e7ca3773..5bbcc51b84 100644
              _ownerProcess->allocateMem(_stackMin, _pageBytes);
              inform("Increasing stack size by one page.");
          }
+         return true;
+     }
+ 
++    // // Making Changes Trying to Default Page FixUP regardless of VMA
++    // Addr vpage_start = roundDown(vaddr, _pageBytes);
++    // Addr huge_page_base = roundDown(vaddr, 64 * 1024);
++    // // Check if *any* 4KB pages inside the 64KB range are already mapped
++    // bool subpagesExist = false;
++    // for (int offset = 0; offset < 64 * 1024; offset += 4 * 1024) {
++    //     Addr page = huge_page_base + offset;
++    //     if (_ownerProcess->pTable->pTable.find(page) != _ownerProcess->pTable->pTable.end()) {
++    //         subpagesExist = true;
++    //         break;
++    //     }
++    // }
++
++    // // Only allocate huge page if none of the 4KB pages are mapped
++    // if (!subpagesExist) {
++    //     DPRINTF(Vma, "Allocating 64KB huge page at virtual address range: [0x%lx-0x%lx)\n",
++    //         huge_page_base, huge_page_base + 64 * 1024);
++    //     _ownerProcess->allocateMem(huge_page_base, 64 * 1024);
++    //     return true;
++    // } else {
++    //     DPRINTF(Vma, "Allocating 4KB page at virtual address range: [0x%lx-0x%lx)\n",
++    //         vpage_start, vpage_start + _pageBytes);
++    //     _ownerProcess->allocateMem(vpage_start, _pageBytes); // fallback to 4KB
++    //     return true;
++    // }
+     return false;
+ }
+ 
 diff --git a/src/sim/process.cc b/src/sim/process.cc
 index 7b6e2d0de2..db299a2ebe 100644
 --- a/src/sim/process.cc
