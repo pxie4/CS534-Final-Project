@@ -52,6 +52,11 @@ make
 ```
 This will trigger the compilation process. The output binaries (qsort_small and qsort_large) will be created in the current directory. Already compiled binaries are located in the ```bin``` folder
 
+If want to run in terminal 
+```bash
+sudo apt-get install qemu-user
+qemu-arm ./basicmath_small
+```
 ## Running Binary in gem5
 Assumed dependencies are installed and gem5 repo is cloned. 
 
