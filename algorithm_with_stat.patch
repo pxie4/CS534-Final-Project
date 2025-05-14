@@ -23,20 +23,18 @@ index 9543f965b7..1c3606f473 100644
 +    }
  }
 diff --git a/src/arch/arm/mmu.cc b/src/arch/arm/mmu.cc
-index 47f3a796ca..d0d4f16c06 100644
+index 47f3a796ca..0a93ef7a08 100644
 --- a/src/arch/arm/mmu.cc
 +++ b/src/arch/arm/mmu.cc
-@@ -51,6 +51,9 @@
- #include "mem/packet_access.hh"
- #include "sim/pseudo_inst.hh"
- #include "sim/process.hh"
-+#include "base/statistics.hh"
-+
-+STATISTIC(myFirstPageAccessCounter, "count first page access");
- 
- namespace gem5
- {
-@@ -362,13 +365,74 @@ MMU::translateSe(const RequestPtr &req, ThreadContext *tc, Mode mode,
+@@ -63,6 +63,7 @@ MMU::MMU(const ArmMMUParams &p)
+     itbWalker(p.itb_walker), dtbWalker(p.dtb_walker),
+     itbStage2Walker(p.stage2_itb_walker),
+     dtbStage2Walker(p.stage2_dtb_walker),
++    myFirstPageAccessCounter(this, "myFirstPageAccessCounter", "count first page access"),
+     test(nullptr),
+     miscRegContext(0),
+     s1State(this, false), s2State(this, true),
+@@ -362,13 +363,74 @@ MMU::translateSe(const RequestPtr &req, ThreadContext *tc, Mode mode,
  
      Process *p = tc->getProcessPtr();
      if (const auto pte = p->pTable->lookup(vaddr); !pte) {
@@ -112,7 +110,7 @@ index 47f3a796ca..d0d4f16c06 100644
          return finalizePhysical(req, tc, mode);
      }
  }
-@@ -1203,12 +1267,12 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
+@@ -1203,12 +1265,12 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
  {
      bool delay = false;
      Fault fault;
@@ -128,7 +126,7 @@ index 47f3a796ca..d0d4f16c06 100644
      DPRINTF(MMU, "Translation returning delay=%d fault=%d\n", delay,
              fault != NoFault);
      // If we have a translation, and we're not in the middle of doing a stage
-@@ -1217,7 +1281,20 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
+@@ -1217,7 +1279,20 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
      // stage 2 translation we prevent marking the translation as delayed twice,
      // one when the translation starts and again when the stage 1 translation
      // completes.
@@ -151,7 +149,7 @@ index 47f3a796ca..d0d4f16c06 100644
          fault != NoFault)) {
          if (!delay)
 diff --git a/src/arch/arm/mmu.hh b/src/arch/arm/mmu.hh
-index c6b1ddbb3e..fd07675ec9 100644
+index c6b1ddbb3e..42ba24f896 100644
 --- a/src/arch/arm/mmu.hh
 +++ b/src/arch/arm/mmu.hh
 @@ -47,7 +47,6 @@
@@ -162,11 +160,12 @@ index c6b1ddbb3e..fd07675ec9 100644
  #include "params/ArmMMU.hh"
  
  namespace gem5
-@@ -81,13 +80,18 @@ class MMU : public BaseMMU
+@@ -81,13 +80,19 @@ class MMU : public BaseMMU
      TableWalker *itbStage2Walker;
      TableWalker *dtbStage2Walker;
  
 +    std::unordered_map<Addr, size_t> pageFirstAccessRecords; // value is page size
++    statistics::Scalar myFirstPageAccessCounter;
 +
    public:
      TranslationGenPtr
@@ -183,24 +182,10 @@ index c6b1ddbb3e..fd07675ec9 100644
  
      enum ArmFlags
 diff --git a/src/mem/page_table.cc b/src/mem/page_table.cc
-index d715e0771f..bbc3e46ed5 100644
+index d715e0771f..08ce227303 100644
 --- a/src/mem/page_table.cc
 +++ b/src/mem/page_table.cc
-@@ -41,6 +41,13 @@
- #include "sim/faults.hh"
- #include "sim/serialize.hh"
- 
-+#include "base/statistics.hh"
-+
-+STATISTIC(my64KBEvictionCounter, "count 64KB page eviction");
-+STATISTIC(my16KBEvictionCounter, "count 16KB page eviction");
-+STATISTIC(my64KBDemotionCounter, "count 64KB page demotion");
-+STATISTIC(my16KBDemotionCounter, "count 16KB page demotion");
-+
- namespace gem5
- {
- 
-@@ -51,6 +58,17 @@ EmulationPageTable::map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags)
+@@ -51,6 +51,17 @@ EmulationPageTable::map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags)
      // starting address must be page aligned
      assert(pageOffset(vaddr) == 0);
  
@@ -218,7 +203,7 @@ index d715e0771f..bbc3e46ed5 100644
      DPRINTF(MMU, "Allocating Page: %#x-%#x\n", vaddr, vaddr + size);
  
      while (size > 0) {
-@@ -132,6 +150,7 @@ EmulationPageTable::isUnmapped(Addr vaddr, int64_t size)
+@@ -132,6 +143,7 @@ EmulationPageTable::isUnmapped(Addr vaddr, int64_t size)
  const EmulationPageTable::Entry *
  EmulationPageTable::lookup(Addr vaddr)
  {
@@ -226,7 +211,7 @@ index d715e0771f..bbc3e46ed5 100644
      Addr page_addr = pageAlign(vaddr);
      PTableItr iter = pTable.find(page_addr);
      if (iter == pTable.end())
-@@ -139,9 +158,144 @@ EmulationPageTable::lookup(Addr vaddr)
+@@ -139,9 +151,144 @@ EmulationPageTable::lookup(Addr vaddr)
      return &(iter->second);
  }
  
@@ -371,7 +356,7 @@ index d715e0771f..bbc3e46ed5 100644
      const Entry *entry = lookup(vaddr);
      if (!entry) {
          DPRINTF(MMU, "Couldn't Translate: %#x\n", vaddr);
-@@ -156,6 +310,7 @@ Fault
+@@ -156,6 +303,7 @@ Fault
  EmulationPageTable::translate(const RequestPtr &req)
  {
      Addr paddr;
@@ -379,7 +364,7 @@ index d715e0771f..bbc3e46ed5 100644
      assert(pageAlign(req->getVaddr() + req->getSize() - 1) ==
             pageAlign(req->getVaddr()));
      if (!translate(req->getVaddr(), paddr))
-@@ -165,6 +320,7 @@ EmulationPageTable::translate(const RequestPtr &req)
+@@ -165,6 +313,7 @@ EmulationPageTable::translate(const RequestPtr &req)
          panic("Request spans page boundaries!\n");
          return NoFault;
      }
@@ -387,7 +372,7 @@ index d715e0771f..bbc3e46ed5 100644
      return NoFault;
  }
  
-@@ -172,6 +328,7 @@ void
+@@ -172,6 +321,7 @@ void
  EmulationPageTable::PageTableTranslationGen::translate(Range &range) const
  {
      const Addr page_size = pt->pageSize();
@@ -396,10 +381,18 @@ index d715e0771f..bbc3e46ed5 100644
      Addr next = roundUp(range.vaddr, page_size);
      if (next == range.vaddr)
 diff --git a/src/mem/page_table.hh b/src/mem/page_table.hh
-index a17250c17d..3ebda6d96b 100644
+index a17250c17d..4fb018291f 100644
 --- a/src/mem/page_table.hh
 +++ b/src/mem/page_table.hh
-@@ -62,11 +62,25 @@ class EmulationPageTable : public Serializable
+@@ -44,6 +44,7 @@
+ #include "mem/request.hh"
+ #include "mem/translation_gen.hh"
+ #include "sim/serialize.hh"
++#include "base/statistics.hh"
+ 
+ namespace gem5
+ {
+@@ -62,11 +63,30 @@ class EmulationPageTable : public Serializable
          Entry() {}
      };
  
@@ -415,7 +408,12 @@ index a17250c17d..3ebda6d96b 100644
 +    std::unordered_map<Addr, PageAccessStats> page64KBStats;
 +    std::unordered_map<Addr, PageAccessStats> page16KBStats;
 +    std::unordered_map<Addr, size_t> evictionPageRecords; // value is page size
-+    uint64_t global_translation_counter; // used to periodiaclly scan for cold pages 
++    uint64_t global_translation_counter; // used to periodiaclly scan for cold pages
++
++    statistics::Scalar my64KBEvictionCounter;
++    statistics::Scalar my16KBEvictionCounter;
++    statistics::Scalar my64KBDemotionCounter;
++    statistics::Scalar my16KBDemotionCounter;
 +    //---------------------
    protected:
      typedef std::unordered_map<Addr, Entry> PTable;
@@ -427,7 +425,18 @@ index a17250c17d..3ebda6d96b 100644
      const Addr _pageSize;
      const Addr offsetMask;
  
-@@ -142,6 +156,12 @@ class EmulationPageTable : public Serializable
+@@ -77,6 +97,10 @@ class EmulationPageTable : public Serializable
+ 
+     EmulationPageTable(
+             const std::string &__name, uint64_t _pid, Addr _pageSize) :
++            my64KBEvictionCounter(this, "my64KBEvictionCounter", "count 64KB page eviction"),
++            my16KBEvictionCounter(this, "my16KBEvictionCounter", "count 16KB page eviction"),
++            my64KBDemotionCounter(this, "my64KBDemotionCounter", "count 64KB page demotion"),
++            my16KBDemotionCounter(this, "my16KBDemotionCounter", "count 16KB page demotion"),
+             _pageSize(_pageSize), offsetMask(mask(floorLog2(_pageSize))),
+             _pid(_pid), _name(__name), shared(false)
+     {
+@@ -142,6 +166,12 @@ class EmulationPageTable : public Serializable
      const Entry *lookup(Addr vaddr);
  
      /**
