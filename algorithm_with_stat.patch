@@ -182,7 +182,7 @@ index c6b1ddbb3e..42ba24f896 100644
  
      enum ArmFlags
 diff --git a/src/mem/page_table.cc b/src/mem/page_table.cc
-index d715e0771f..30a36dcea6 100644
+index d715e0771f..3d0e326f0d 100644
 --- a/src/mem/page_table.cc
 +++ b/src/mem/page_table.cc
 @@ -51,6 +51,17 @@ EmulationPageTable::map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags)
@@ -246,9 +246,9 @@ index d715e0771f..30a36dcea6 100644
 +                        DPRINTF(MMU, "Deallocating page 0x%lx in top quarter (3/4 - end)\n", page);
 +                        evictionPageRecords[page] = size;
 +                        if (size == 64 * 1024) {
-+                            stats.my64KBEvictionCounter++;
++                            myStats.my64KBEvictionCounter++;
 +                        } else {
-+                            stats.my16KBEvictionCounter++;
++                            myStats.my16KBEvictionCounter++;
 +                        };
 +                        // pTable.erase(page);
 +                    } else {
@@ -259,9 +259,9 @@ index d715e0771f..30a36dcea6 100644
 +                                DPRINTF(MMU, "Tracking new 16kB page at 0x%lx\n", new_vaddr);
 +                                page16KBStats[new_vaddr] = PageAccessStats();
 +                            }
-+                            stats.my64KBDemotionCounter++;
++                            myStats.my64KBDemotionCounter++;
 +                        } else {
-+                            stats.my16KBDemotionCounter++;
++                            myStats.my16KBDemotionCounter++;
 +                        }
 +                    }
 +                } else if (offset >= size * 1 / 2) {
@@ -269,9 +269,9 @@ index d715e0771f..30a36dcea6 100644
 +                        DPRINTF(MMU, "Deallocating page 0x%lx in upper half (1/2 - 3/4)\n", page);
 +                        evictionPageRecords[page] = size;
 +                        if (size == 64 * 1024) {
-+                            stats.my64KBEvictionCounter++;
++                            myStats.my64KBEvictionCounter++;
 +                        } else {
-+                            stats.my16KBEvictionCounter++;
++                            myStats.my16KBEvictionCounter++;
 +                        };
 +                        // pTable.erase(page);
 +                    } else {
@@ -282,9 +282,9 @@ index d715e0771f..30a36dcea6 100644
 +                                DPRINTF(MMU, "Tracking new 16kB page at 0x%lx\n", new_vaddr);
 +                                page16KBStats[new_vaddr] = PageAccessStats();
 +                            }
-+                            stats.my64KBDemotionCounter++;
++                            myStats.my64KBDemotionCounter++;
 +                        } else {
-+                            stats.my16KBDemotionCounter++;
++                            myStats.my16KBDemotionCounter++;
 +                        }
 +                    }
 +                } else if (offset >= size * 1 / 4) {
@@ -292,9 +292,9 @@ index d715e0771f..30a36dcea6 100644
 +                        DPRINTF(MMU, "Deallocating page 0x%lx in middle (1/4 - 1/2)\n", page);
 +                        evictionPageRecords[page] = size;
 +                        if (size == 64 * 1024) {
-+                            stats.my64KBEvictionCounter++;
++                            myStats.my64KBEvictionCounter++;
 +                        } else {
-+                            stats.my16KBEvictionCounter++;
++                            myStats.my16KBEvictionCounter++;
 +                        };
 +                        // pTable.erase(page);
 +                    } else {
@@ -305,9 +305,9 @@ index d715e0771f..30a36dcea6 100644
 +                                DPRINTF(MMU, "Tracking new 16kB page at 0x%lx\n", new_vaddr);
 +                                page16KBStats[new_vaddr] = PageAccessStats();
 +                            }
-+                            stats.my64KBDemotionCounter++;
++                            myStats.my64KBDemotionCounter++;
 +                        } else {
-+                            stats.my16KBDemotionCounter++;
++                            myStats.my16KBDemotionCounter++;
 +                        }
 +                    }
 +                } else {
@@ -315,9 +315,9 @@ index d715e0771f..30a36dcea6 100644
 +                        DPRINTF(MMU, "Deallocating page 0x%lx in lower quarter (0 - 1/4)\n", page);
 +                        evictionPageRecords[page] = size;
 +                        if (size == 64 * 1024) {
-+                            stats.my64KBEvictionCounter++;
++                            myStats.my64KBEvictionCounter++;
 +                        } else {
-+                            stats.my16KBEvictionCounter++;
++                            myStats.my16KBEvictionCounter++;
 +                        };
 +                        // pTable.erase(page);
 +                    } else {
@@ -328,9 +328,9 @@ index d715e0771f..30a36dcea6 100644
 +                                DPRINTF(MMU, "Tracking new 16kB page at 0x%lx\n", new_vaddr);
 +                                page16KBStats[new_vaddr] = PageAccessStats();
 +                            }
-+                            stats.my64KBDemotionCounter++;
++                            myStats.my64KBDemotionCounter++;
 +                        } else {
-+                            stats.my16KBDemotionCounter++;
++                            myStats.my16KBDemotionCounter++;
 +                        }
 +                    }
 +                }
@@ -381,7 +381,7 @@ index d715e0771f..30a36dcea6 100644
      Addr next = roundUp(range.vaddr, page_size);
      if (next == range.vaddr)
 diff --git a/src/mem/page_table.hh b/src/mem/page_table.hh
-index a17250c17d..468ae67588 100644
+index a17250c17d..40130f2155 100644
 --- a/src/mem/page_table.hh
 +++ b/src/mem/page_table.hh
 @@ -44,6 +44,7 @@
@@ -429,7 +429,7 @@ index a17250c17d..468ae67588 100644
 +        statistics::Scalar my16KBEvictionCounter;
 +        statistics::Scalar my64KBDemotionCounter;
 +        statistics::Scalar my16KBDemotionCounter;
-+    } stats;
++    } myStats;
 +
    public:
  
@@ -441,7 +441,7 @@ index a17250c17d..468ae67588 100644
 +//            my16KBDemotionCounter(this, "my16KBDemotionCounter", "count 16KB page demotion"),
              _pageSize(_pageSize), offsetMask(mask(floorLog2(_pageSize))),
 -            _pid(_pid), _name(__name), shared(false)
-+            _pid(_pid), _name(__name), stats(nullptr), shared(false)
++            _pid(_pid), _name(__name), myStats(nullptr), shared(false)
      {
          assert(isPowerOf2(_pageSize));
      }
