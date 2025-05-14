@@ -381,7 +381,7 @@ index d715e0771f..08ce227303 100644
      Addr next = roundUp(range.vaddr, page_size);
      if (next == range.vaddr)
 diff --git a/src/mem/page_table.hh b/src/mem/page_table.hh
-index a17250c17d..4fb018291f 100644
+index a17250c17d..cfe5cc9fe2 100644
 --- a/src/mem/page_table.hh
 +++ b/src/mem/page_table.hh
 @@ -44,6 +44,7 @@
@@ -392,7 +392,7 @@ index a17250c17d..4fb018291f 100644
  
  namespace gem5
  {
-@@ -62,11 +63,30 @@ class EmulationPageTable : public Serializable
+@@ -62,10 +63,23 @@ class EmulationPageTable : public Serializable
          Entry() {}
      };
  
@@ -409,34 +409,43 @@ index a17250c17d..4fb018291f 100644
 +    std::unordered_map<Addr, PageAccessStats> page16KBStats;
 +    std::unordered_map<Addr, size_t> evictionPageRecords; // value is page size
 +    uint64_t global_translation_counter; // used to periodiaclly scan for cold pages
-+
-+    statistics::Scalar my64KBEvictionCounter;
-+    statistics::Scalar my16KBEvictionCounter;
-+    statistics::Scalar my64KBDemotionCounter;
-+    statistics::Scalar my16KBDemotionCounter;
 +    //---------------------
    protected:
      typedef std::unordered_map<Addr, Entry> PTable;
      typedef PTable::iterator PTableItr;
 -    PTable pTable;
--
-+    
-+   
+ 
      const Addr _pageSize;
      const Addr offsetMask;
+@@ -73,12 +87,26 @@ class EmulationPageTable : public Serializable
+     const uint64_t _pid;
+     const std::string _name;
  
-@@ -77,6 +97,10 @@ class EmulationPageTable : public Serializable
++    struct Stats : public statistics::Group
++    {
++        Stats(statistics::Group *parent);
++        // Access Stats
++        statistics::Scalar my64KBEvictionCounter;
++        statistics::Scalar my16KBEvictionCounter;
++        statistics::Scalar my64KBDemotionCounter;
++        statistics::Scalar my16KBDemotionCounter;
++    } stats;
++
+   public:
  
      EmulationPageTable(
              const std::string &__name, uint64_t _pid, Addr _pageSize) :
-+            my64KBEvictionCounter(this, "my64KBEvictionCounter", "count 64KB page eviction"),
-+            my16KBEvictionCounter(this, "my16KBEvictionCounter", "count 16KB page eviction"),
-+            my64KBDemotionCounter(this, "my64KBDemotionCounter", "count 64KB page demotion"),
-+            my16KBDemotionCounter(this, "my16KBDemotionCounter", "count 16KB page demotion"),
++//            my64KBEvictionCounter(this, "my64KBEvictionCounter", "count 64KB page eviction"),
++//            my16KBEvictionCounter(this, "my16KBEvictionCounter", "count 16KB page eviction"),
++//            my64KBDemotionCounter(this, "my64KBDemotionCounter", "count 64KB page demotion"),
++//            my16KBDemotionCounter(this, "my16KBDemotionCounter", "count 16KB page demotion"),
              _pageSize(_pageSize), offsetMask(mask(floorLog2(_pageSize))),
-             _pid(_pid), _name(__name), shared(false)
+-            _pid(_pid), _name(__name), shared(false)
++            _pid(_pid), _name(__name), shared(false), stats(this)
      {
-@@ -142,6 +166,12 @@ class EmulationPageTable : public Serializable
+         assert(isPowerOf2(_pageSize));
+     }
+@@ -142,6 +170,12 @@ class EmulationPageTable : public Serializable
      const Entry *lookup(Addr vaddr);
  
      /**
