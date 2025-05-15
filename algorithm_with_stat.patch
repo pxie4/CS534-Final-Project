@@ -23,18 +23,39 @@ index 9543f965b7..1c3606f473 100644
 +    }
  }
 diff --git a/src/arch/arm/mmu.cc b/src/arch/arm/mmu.cc
-index 47f3a796ca..0a93ef7a08 100644
+index 47f3a796ca..951b94ea8a 100644
 --- a/src/arch/arm/mmu.cc
 +++ b/src/arch/arm/mmu.cc
-@@ -63,6 +63,7 @@ MMU::MMU(const ArmMMUParams &p)
+@@ -51,18 +51,28 @@
+ #include "mem/packet_access.hh"
+ #include "sim/pseudo_inst.hh"
+ #include "sim/process.hh"
++#include "sim/root.hh"
++#include "sim/system.hh"
+ 
+ namespace gem5
+ {
+ 
+ using namespace ArmISA;
+ 
++gem5::System* findSystem() {
++    auto *so = gem5::Root::root()->find("system");
++    auto *sys = dynamic_cast<gem5::System*>(so);
++    assert(sys && "cannot find the System SimObject");
++    return sys;
++}
++
+ MMU::MMU(const ArmMMUParams &p)
+   : BaseMMU(p),
+     itbStage2(p.stage2_itb), dtbStage2(p.stage2_dtb),
      itbWalker(p.itb_walker), dtbWalker(p.dtb_walker),
      itbStage2Walker(p.stage2_itb_walker),
      dtbStage2Walker(p.stage2_dtb_walker),
-+    myFirstPageAccessCounter(this, "myFirstPageAccessCounter", "count first page access"),
++    myFirstPageAccessCounter(findSystem(), "myFirstPageAccessCounter", "count first page access"),
      test(nullptr),
      miscRegContext(0),
      s1State(this, false), s2State(this, true),
-@@ -362,13 +363,74 @@ MMU::translateSe(const RequestPtr &req, ThreadContext *tc, Mode mode,
+@@ -362,13 +372,74 @@ MMU::translateSe(const RequestPtr &req, ThreadContext *tc, Mode mode,
  
      Process *p = tc->getProcessPtr();
      if (const auto pte = p->pTable->lookup(vaddr); !pte) {
@@ -110,7 +131,7 @@ index 47f3a796ca..0a93ef7a08 100644
          return finalizePhysical(req, tc, mode);
      }
  }
-@@ -1203,12 +1265,12 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
+@@ -1203,12 +1274,12 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
  {
      bool delay = false;
      Fault fault;
@@ -126,7 +147,7 @@ index 47f3a796ca..0a93ef7a08 100644
      DPRINTF(MMU, "Translation returning delay=%d fault=%d\n", delay,
              fault != NoFault);
      // If we have a translation, and we're not in the middle of doing a stage
-@@ -1217,7 +1279,20 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
+@@ -1217,7 +1288,20 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
      // stage 2 translation we prevent marking the translation as delayed twice,
      // one when the translation starts and again when the stage 1 translation
      // completes.
@@ -182,7 +203,7 @@ index c6b1ddbb3e..42ba24f896 100644
  
      enum ArmFlags
 diff --git a/src/mem/page_table.cc b/src/mem/page_table.cc
-index d715e0771f..3d0e326f0d 100644
+index d715e0771f..4f966c5e18 100644
 --- a/src/mem/page_table.cc
 +++ b/src/mem/page_table.cc
 @@ -51,6 +51,17 @@ EmulationPageTable::map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags)
@@ -380,8 +401,27 @@ index d715e0771f..3d0e326f0d 100644
  
      Addr next = roundUp(range.vaddr, page_size);
      if (next == range.vaddr)
+@@ -220,6 +370,18 @@ EmulationPageTable::unserialize(CheckpointIn &cp)
+     }
+ }
+ 
++EmulationPageTable::Stats::Stats(statistics::Group *parent)
++        : statistics::Group(parent, "page_access_stats"),
++          my64KBEvictionCounter(this, "my64KBEvictionCounter",
++                                "Count of 64KB page evictions"),
++          my16KBEvictionCounter(this, "my16KBEvictionCounter",
++                                "Count of 16KB page evictions"),
++          my64KBDemotionCounter(this, "my64KBDemotionCounter",
++                                "Count of 64KB page demotions"),
++          my16KBDemotionCounter(this, "my16KBDemotionCounter",
++                                "Count of 16KB page demotions")
++{}
++
+ const std::string
+ EmulationPageTable::externalize() const
+ {
 diff --git a/src/mem/page_table.hh b/src/mem/page_table.hh
-index a17250c17d..40130f2155 100644
+index a17250c17d..33892c2be9 100644
 --- a/src/mem/page_table.hh
 +++ b/src/mem/page_table.hh
 @@ -44,6 +44,7 @@
@@ -417,7 +457,7 @@ index a17250c17d..40130f2155 100644
  
      const Addr _pageSize;
      const Addr offsetMask;
-@@ -73,12 +87,26 @@ class EmulationPageTable : public Serializable
+@@ -73,12 +87,33 @@ class EmulationPageTable : public Serializable
      const uint64_t _pid;
      const std::string _name;
  
@@ -431,6 +471,13 @@ index a17250c17d..40130f2155 100644
 +        statistics::Scalar my16KBDemotionCounter;
 +    } myStats;
 +
++    gem5::System* findSystem() {
++        auto *so = gem5::Root::root()->find("system");
++        auto *sys = dynamic_cast<gem5::System*>(so);
++        assert(sys && "cannot find the System SimObject");
++        return sys;
++    }
++
    public:
  
      EmulationPageTable(
@@ -441,11 +488,11 @@ index a17250c17d..40130f2155 100644
 +//            my16KBDemotionCounter(this, "my16KBDemotionCounter", "count 16KB page demotion"),
              _pageSize(_pageSize), offsetMask(mask(floorLog2(_pageSize))),
 -            _pid(_pid), _name(__name), shared(false)
-+            _pid(_pid), _name(__name), myStats(nullptr), shared(false)
++            _pid(_pid), _name(__name), myStats(findSystem), shared(false)
      {
          assert(isPowerOf2(_pageSize));
      }
-@@ -142,6 +170,12 @@ class EmulationPageTable : public Serializable
+@@ -142,6 +177,12 @@ class EmulationPageTable : public Serializable
      const Entry *lookup(Addr vaddr);
  
      /**
