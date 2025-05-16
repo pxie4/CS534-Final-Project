@@ -37,6 +37,8 @@ binaries=(
     "$DIJKSTRA_DIR/dijkstra_large"
     "$QSORT_DIR/qsort_small"
     "$QSORT_DIR/qsort_large"
+    "$BIN_DIR/CRC2/crc"
+    "$BIN_DIR/sha256/sha"
 )
 
 # Corresponding input arguments (same index as binaries)
@@ -48,6 +50,8 @@ binary_args=(
     "$DIJKSTRA_DIR/input.dat"              # dijkstra_large
     "$QSORT_DIR/input_small.dat"           # qsort_small
     "$QSORT_DIR/input_large.dat"           # qsort_large
+    "$BIN_DIR/CRC2/large.pcm"
+    "$BIN_DIR/sha256/input_large.asc"
 )
 
 # Set the base directory of gem5 repository (modify this path)
