@@ -16,16 +16,19 @@ QSORT_DIR="$BIN_DIR/qsort"
 # Set base gem5 command (except for --cmd)
 base_cmd="build/ARM/gem5.opt"
 
-configs="configs/deprecated/example/se.py \
-    --cpu-type=ArmMinorCPU \
-    --cpu-clock=4GHz \
-    --cacheline_size=64 \
+ configs="configs/deprecated/example/se.py \
+    --cpu-type=ArmO3CPU \
+    --cpu-clock=1GHz \
+    --sys-clock=1GHz \
     --caches \
-    --l1i_size=8kB \
-    --l1d_size=8kB \
+    --l1i_size=32kB \
+    --l1d_size=32kB \
     --l2cache \
-    --l2_size=4MB \
-    --l2_assoc=16 \
+    --l2_size=512kB \
+    --l2_assoc=8 \
+    --mem-type=LPDDR2_S4_1066_1x32 \
+    --mem-channels=1 \
+    --mem-size=1GiB \
     --num-cpus=4"
 
 # List of binaries to test
